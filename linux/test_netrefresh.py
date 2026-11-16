@@ -4,6 +4,7 @@ import os
 import struct
 import tempfile
 import unittest
+from unittest import mock
 
 import netrefresh as nr
 
@@ -56,6 +57,78 @@ class Parsing(unittest.TestCase):
         self.assertFalse(nr.dns_reply_ok(struct.pack(">HHHHHH", 0x1234, 0x8183, 1, 0, 0, 0), 0x1234))   # NXDOMAIN
         self.assertFalse(nr.dns_reply_ok(struct.pack(">HHHHHH", 0x1234, 0x8180, 1, 0, 0, 0), 0x1234))   # no answers
         self.assertFalse(nr.dns_reply_ok(b"short", 0x1234))
+
+
+class Ping(unittest.TestCase):
+    """A missing or broken `ping` program must not look like an outage."""
+
+    def test_reply_and_no_reply(self):
+        with mock.patch.object(nr.shutil, "which", return_value="/bin/ping"):
+            with mock.patch.object(nr, "run", return_value=(0, "")):
+                self.assertTrue(nr.ping("1.1.1.1"))
+            with mock.patch.object(nr, "run", return_value=(1, "")), mock.patch.object(nr.socket, "create_connection", side_effect=AssertionError("no TCP fallback after a clean 'no reply'")):
+                self.assertFalse(nr.ping("1.1.1.1"))
+
+    def test_missing_ping_falls_back_to_tcp(self):
+        with mock.patch.object(nr.shutil, "which", return_value=None):
+            with mock.patch.object(nr.socket, "create_connection", return_value=mock.Mock()) as cc:
+                self.assertTrue(nr.ping("1.1.1.1"))
+                cc.assert_called_once()
+            with mock.patch.object(nr.socket, "create_connection", side_effect=OSError):
+                self.assertFalse(nr.ping("192.0.2.1"))
+
+    def test_ping_that_errors_falls_back_too(self):
+        with mock.patch.object(nr.shutil, "which", return_value="/bin/ping"), mock.patch.object(nr, "run", return_value=(2, "ping: socket: Operation not permitted")):
+            with mock.patch.object(nr.socket, "create_connection", return_value=mock.Mock()):
+                self.assertTrue(nr.ping("1.1.1.1"))
+
+
+class Diagnose(unittest.TestCase):
+    ROUTE = ("10.0.0.1", "nrtest0")
+
+    def test_a_gateway_that_drops_ping_is_not_blamed_for_dns_or_service_problems(self):
+        with mock.patch.object(nr, "default_route", return_value=self.ROUTE), mock.patch.object(nr, "ping", return_value=False):
+            self.assertEqual(nr.diagnose("dns"), "Internet OK but DNS failing (router DNS)")
+            self.assertIn("service tailscaled is not running", nr.diagnose("service:tailscaled"))
+
+    def test_internet_outage_router_checks(self):
+        with mock.patch.object(nr, "default_route", return_value=self.ROUTE), mock.patch.object(nr, "ping", return_value=False):
+            with mock.patch.object(nr, "neighbor_ok", return_value=True):      # answers ARP but not ping
+                self.assertTrue(nr.diagnose("internet").startswith("Router OK but no internet"))
+            with mock.patch.object(nr, "neighbor_ok", return_value=False):
+                self.assertEqual(nr.diagnose("internet"), "Router unreachable (LAN side)")
+        with mock.patch.object(nr, "default_route", return_value=(None, None)):
+            self.assertEqual(nr.diagnose("internet"), "No default gateway (DHCP lease lost)")
+
+    def test_neighbor_states(self):
+        for text, expect in (("10.0.0.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n", True), ("10.0.0.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff router STALE\n", True),
+                             ("10.0.0.1 dev eth0 FAILED\n", False), ("10.0.0.1 dev eth0 INCOMPLETE\n", False), ("", False)):
+            with mock.patch.object(nr, "run", return_value=(0, text)):
+                self.assertEqual(nr.neighbor_ok("10.0.0.1"), expect, text)
+
+
+class Interface(unittest.TestCase):
+    def test_keeps_the_last_good_interface_when_the_route_vanishes(self):
+        nr._last_dev = None
+        with mock.patch.object(nr, "default_route", return_value=("10.0.0.1", "eth0")):
+            self.assertEqual(nr.current_dev(), "eth0")
+        with mock.patch.object(nr, "default_route", return_value=(None, None)):
+            self.assertEqual(nr.current_dev(), "eth0")          # link down: the route is gone, the NIC is still the one to bounce
+
+
+class Resilience(unittest.TestCase):
+    def test_loop_survives_an_exception(self):
+        with tempfile.TemporaryDirectory() as d:
+            class Boom(FakeWatchdog):
+                calls = 0
+                def tick(self):
+                    Boom.calls += 1
+                    if Boom.calls == 1:
+                        raise RuntimeError("one bad check")
+                    self.stop = True
+            w = Boom(dict(cfg(), check_interval=1), nr.Store(d))
+            w.run_forever()
+            self.assertEqual(Boom.calls, 2)
 
 
 class StoreAndGraph(unittest.TestCase):

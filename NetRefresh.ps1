@@ -45,7 +45,8 @@ function Diagnose($h) {
     if (-not (Get-NetAdapter -Physical | Where-Object Status -eq 'Up')) { return 'Ethernet link down (cable/NIC/driver)' }
     $gw = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object NextHop -ne '0.0.0.0' | Sort-Object RouteMetric | Select-Object -First 1).NextHop
     if (-not $gw) { return 'No default gateway (DHCP lease lost)' }
-    if (-not (Ping $gw 1000)) { return 'Router unreachable (LAN side)' }
+    # only an internet outage can blame the router: for dns/remote-tool problems the internet answered a moment ago, and a router that ignores ping would be wrongly accused
+    if ($h -eq 'internet' -and -not (Ping $gw 1000)) { return 'Router unreachable (LAN side)' }
     switch ($h) {
         'internet' { 'Router OK but no internet (ISP/WAN drop or router reconnect)' }
         'dns' { 'Internet OK but DNS failing (router DNS)' }

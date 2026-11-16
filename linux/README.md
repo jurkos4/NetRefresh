@@ -64,7 +64,8 @@ Sat 14.11 ...........................~~~~.................
 
 ## Good to know
 
-- **Tested:** the logic (escalation, cooldowns, DNS packets, graph, history file) has unit tests that run anywhere: `python3 -m unittest -v`. The system commands (`ip`, `systemctl`, `networkctl`, `nmcli`, `resolvectl`) follow their standard behaviour but have not been run on a real Linux server by the author yet. Please open an issue if one misbehaves on your distro.
+- **Tested:** the logic has unit tests that run anywhere: `python3 -m unittest -v`. It has also been run end to end on Ubuntu 24.04 (WSL2 with systemd): install and service, outage detection and diagnosis, the soft reset at 90 s and hard reset at 5 min, recovery and history, a watched service restarted without touching the network, the daily action, and a system without the `ping` program.
+- **Not tested yet:** a real reboot, NetworkManager / systemd-networkd restarts and DHCP renewal on real hardware (WSL has neither), and other distros. Please open an issue if something misbehaves on yours.
 - Distros without systemd are not supported by the installer. Without NetworkManager or systemd-networkd only the link bounce is done.
 - Automatic reboots from `unattended-upgrades` are a separate setting (`Unattended-Upgrade::Automatic-Reboot`); NetRefresh does not change it.
 - Cannot help if the server is powered off or the ISP is really down.

@@ -29,6 +29,9 @@ command -v systemctl >/dev/null || { echo "systemd is required."; exit 1; }
 PY=$(command -v python3) || { echo "python3 is required."; exit 1; }
 "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 7))' || { echo "Python 3.7 or newer is required."; exit 1; }
 
+command -v ping >/dev/null || echo "Note: 'ping' is not installed, NetRefresh will check with TCP connections instead."
+command -v ip >/dev/null || echo "Note: 'ip' (iproute2) is not installed, so the link cannot be bounced and causes will be less precise."
+
 install -d "$DEST" /etc/netrefresh
 install -d -m 755 /var/lib/netrefresh
 install -m 755 netrefresh.py "$DEST/netrefresh.py"

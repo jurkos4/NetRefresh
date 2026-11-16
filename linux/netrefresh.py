@@ -48,7 +48,19 @@ def run(cmd, timeout=30):
 
 
 def ping(host, wait=1):
-    return run(["ping", "-c", "1", "-W", str(wait), host], timeout=wait + 3)[0] == 0
+    """True if the host answers. Without a usable `ping` program (minimal images) a TCP connect is used instead:
+    a missing tool must never look like an outage, or the watchdog would reset and reboot a healthy server."""
+    if shutil.which("ping"):
+        rc = run(["ping", "-c", "1", "-W", str(wait), host], timeout=wait + 3)[0]
+        if rc in (0, 1):          # 0 = reply, 1 = no reply; anything else means ping itself failed
+            return rc == 0
+    for port in (53, 443, 80):
+        try:
+            socket.create_connection((host, port), timeout=wait).close()
+            return True
+        except OSError:
+            pass
+    return False
 
 
 def parse_default_route(text):
@@ -62,6 +74,28 @@ def parse_default_route(text):
 
 def default_route():
     return parse_default_route(run(["ip", "-4", "route", "show", "default"])[1])
+
+
+_last_dev = None
+
+
+def current_dev():
+    """The interface to repair: the default route's, else the last one seen working, else the first physical NIC.
+    (When the link drops, the default route vanishes, which is exactly when the interface is needed.)"""
+    global _last_dev
+    dev = default_route()[1]
+    if dev:
+        _last_dev = dev
+        return dev
+    if _last_dev:
+        return _last_dev
+    try:
+        for name in sorted(os.listdir("/sys/class/net")):
+            if name != "lo" and os.path.exists("/sys/class/net/%s/device" % name):
+                return name
+    except OSError:
+        pass
+    return None
 
 
 def dns_servers():
@@ -125,7 +159,14 @@ def health(cfg):
     for unit in cfg["watch_services"]:
         if not service_active(unit):
             return "service:" + unit
+    current_dev()   # remember the working interface while all is well
     return "ok"
+
+
+def neighbor_ok(gw):
+    """True if the kernel has recently talked to the gateway (ARP/ND state): proves it is there even if it drops ping."""
+    state = run(["ip", "neigh", "show", gw])[1].split()
+    return bool(state) and state[-1] in ("REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT")
 
 
 def diagnose(kind):
@@ -140,9 +181,11 @@ def diagnose(kind):
             pass
     if not gw:
         return "No default gateway (DHCP lease lost)"
-    if not ping(gw):
-        return "Router unreachable (LAN side)"
+    # Only an internet outage can blame the router. For dns/service kinds the internet answered a moment ago, and many
+    # gateways (cloud VPCs, some routers) ignore ping, so asking them would give a false "router unreachable".
     if kind == "internet":
+        if not (ping(gw) or neighbor_ok(gw)):
+            return "Router unreachable (LAN side)"
         return "Router OK but no internet (ISP/WAN drop or router reconnect)"
     if kind == "dns":
         return "Internet OK but DNS failing (router DNS)"
@@ -193,7 +236,7 @@ def soft_reset(cfg, log):
     for cmd in (["resolvectl", "flush-caches"], ["systemd-resolve", "--flush-caches"]):
         if shutil.which(cmd[0]) and run(cmd)[0] == 0:
             break
-    dev = default_route()[1]
+    dev = current_dev()
     if dev:
         bounce(dev, log)
         renew(dev)
@@ -210,7 +253,7 @@ def hard_reset(cfg, log):
     if shutil.which("systemctl") and service_active("systemd-resolved"):
         restart_unit("systemd-resolved", log)
     time.sleep(8)
-    dev = default_route()[1]
+    dev = current_dev()
     if dev:
         bounce(dev, log)
         renew(dev)
@@ -429,8 +472,11 @@ class Watchdog:
         except (OSError, ValueError):
             pass
         while not self.stop:
-            self.tick()
-            self.check_daily()
+            try:
+                self.tick()
+                self.check_daily()
+            except Exception as e:   # the watchdog must outlive any single failed check
+                self.log("Internal error (continuing): %r" % (e,))
             for _ in range(int(self.cfg["check_interval"])):
                 if self.stop:
                     break
