@@ -237,14 +237,17 @@ $chkAuto = New-Object Windows.Forms.CheckBox -Property @{ Text = 'Start with Win
 $chkCrd = New-Object Windows.Forms.CheckBox -Property @{ Text = 'Watch Chrome Remote Desktop'; Location = '10,144'; Size = '240,22'; Checked = $script:watchCrd }
 $chkTs = New-Object Windows.Forms.CheckBox -Property @{ Text = 'Reboot Tailscale'; Location = '260,144'; Size = '300,22'; Checked = $script:watchTs }
 $lblApp = New-Object Windows.Forms.Label -Property @{ Text = 'Open at login:'; Location = '10,176'; AutoSize = $true }
-$combo = New-Object Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Location = '100,172'; Width = 300 }
+$appSearch = New-Object Windows.Forms.TextBox -Property @{ Location = '105,172'; Width = 150 }
+(New-Object Windows.Forms.ToolTip).SetToolTip($appSearch, 'Type to search your apps')
+$combo = New-Object Windows.Forms.ComboBox -Property @{ DropDownStyle = 'DropDownList'; Location = '265,172'; Width = 255 }
 $script:apps = @{}   # Start-menu name -> AppID (works for Store apps like Claude Desktop and normal programs)
 [void]$combo.Items.Add('(nothing)')
-foreach ($a in Get-StartApps | Sort-Object Name) { if (-not $script:apps.ContainsKey($a.Name)) { $script:apps[$a.Name] = $a.AppID; [void]$combo.Items.Add($a.Name) } }
+$script:appNames = New-Object Collections.ArrayList   # full list, so the search box can narrow the combo and widen it again
+foreach ($a in Get-StartApps | Sort-Object Name) { if (-not $script:apps.ContainsKey($a.Name)) { $script:apps[$a.Name] = $a.AppID; [void]$script:appNames.Add($a.Name); [void]$combo.Items.Add($a.Name) } }
 $combo.SelectedItem = if ($set -and $set.launch -and $script:apps.ContainsKey($set.launch)) { $set.launch } elseif ($null -eq $set -and $script:apps.ContainsKey('Claude')) { 'Claude' } else { '(nothing)' }
 $lblLogin = New-Object Windows.Forms.Label -Property @{ Location = '10,202'; Size = '615,20' }
 $box = New-Object Windows.Forms.TextBox -Property @{ Multiline = $true; ReadOnly = $true; ScrollBars = 'Vertical'; Location = '10,228'; Size = '615,256'; Anchor = 'Top,Left,Right,Bottom' }
-$t1.Controls.AddRange(@($lbl, $pick, $btn, $now, $rb, $rbCancel, $stat, $chkRb, $chkFull, $chkAuto, $chkCrd, $chkTs, $lblApp, $combo, $lblLogin, $box))
+$t1.Controls.AddRange(@($lbl, $pick, $btn, $now, $rb, $rbCancel, $stat, $chkRb, $chkFull, $chkAuto, $chkCrd, $chkTs, $lblApp, $appSearch, $combo, $lblLogin, $box))
 
 $sum = New-Object Windows.Forms.Label -Property @{ Location = '10,8'; Size = '610,20' }
 $pg = New-Object Windows.Forms.Panel -Property @{ Location = '10,32'; Size = '615,210'; BorderStyle = 'FixedSingle' }
@@ -397,6 +400,15 @@ $ntfyTest.Add_Click({
     try { Send-Ntfy 'NetRefresh test' 'If you can read this, phone alerts work.'; Log 'Test alert sent' } catch { Log "Test alert failed: $_" }
 })
 $combo.Add_SelectedIndexChanged({ Save-Settings })
+$appSearch.Add_TextChanged({   # substring search; the first match gets selected, clearing the box keeps the choice
+    $q = $appSearch.Text.Trim(); $cur = [string]$combo.SelectedItem
+    $combo.BeginUpdate(); $combo.Items.Clear(); [void]$combo.Items.Add('(nothing)')
+    foreach ($n in $script:appNames) { if (-not $q -or $n.IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -ge 0) { [void]$combo.Items.Add($n) } }
+    $combo.EndUpdate()
+    if ($q -and $combo.Items.Count -gt 1) { $combo.SelectedIndex = 1 }
+    elseif ($combo.Items.Contains($cur)) { $combo.SelectedItem = $cur }
+    else { $combo.SelectedIndex = 0 }
+})
 # started by the login task (-Boot): open the chosen app once, 30 s later so the network is up
 $script:launchAt = if ($Boot) { (Get-Date).AddSeconds(30) } else { $null }
 $chkAuto.Add_Click({
