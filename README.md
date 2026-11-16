@@ -14,7 +14,7 @@ It is one window (WinForms, hosted in a tiny C# exe) and the logic is a single r
 - **Cause detection**: Ethernet link, no gateway, router unreachable, ISP/WAN drop, DNS failure, remote tool stopped.
 - **Outage history**: `outages.csv`, `netrefresh.log`, and a 7-day graph (one row per day) with the list of outages.
 - **Come back after a restart**: optional auto-login, start with Windows (admin, no prompt) and open a chosen app (pick it from a searchable list of your Start-menu apps).
-- **Extras**: keep the PC awake, stop Windows Update restarting it by itself, tray icon with pop-ups, phone alerts through [ntfy.sh](https://ntfy.sh), a test-restart button.
+- **Extras**: keep the PC awake, stop Windows Update restarting it by itself, tray icon (optionally hide the window there, with pop-ups), phone alerts through [ntfy.sh](https://ntfy.sh), a test-restart button.
 
 ## Build and run
 

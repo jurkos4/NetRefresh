@@ -271,14 +271,14 @@ $au = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
 $chkAwake = New-Object Windows.Forms.CheckBox -Property @{ Text = 'Keep this PC awake while NetRefresh runs (Windows cannot idle-sleep; the screen may still turn off)'; Location = '10,14'; Size = '610,22'; Checked = [bool]($null -eq $set -or $null -eq $set.keepAwake -or $set.keepAwake) }
 $chkUpd = New-Object Windows.Forms.CheckBox -Property @{ Text = 'Stop Windows Update restarting the PC by itself while I am signed in'; Location = '10,42'; Size = '610,22'
     Checked = [bool]((Get-ItemProperty $au -Name NoAutoRebootWithLoggedOnUsers -ErrorAction SilentlyContinue).NoAutoRebootWithLoggedOnUsers -eq 1) }
-$chkTray = New-Object Windows.Forms.CheckBox -Property @{ Text = 'Minimize to the tray icon and show pop-up alerts (starts hidden after a login restart)'; Location = '10,70'; Size = '610,22'; Checked = [bool]($set -and $set.tray) }
+$chkTray = New-Object Windows.Forms.CheckBox -Property @{ Text = 'Hide the window in the tray when minimized, and show pop-up alerts (starts hidden after a login restart)'; Location = '10,70'; Size = '610,22'; Checked = [bool]($set -and $set.tray) }
 $l4a = New-Object Windows.Forms.Label -Property @{ Text = 'Phone alerts (ntfy.sh topic):'; Location = '10,110'; AutoSize = $true }
 $ntfyBox = New-Object Windows.Forms.TextBox -Property @{ Location = '170,106'; Width = 240; Text = $script:ntfy }
 $ntfyTest = New-Object Windows.Forms.Button -Property @{ Text = 'Send test'; Location = '420,104'; Size = '90,26' }
 $l4b = New-Object Windows.Forms.Label -Property @{ Location = '10,142'; Size = '610,140'; ForeColor = 'DimGray'
     Text = "Install the free ntfy app on your phone and subscribe to the same topic. Use a long random topic: anyone who knows it can read the alerts. Letters, digits, - and _ only. Leave empty for no alerts.`r`n`r`nSent for: outage start, recovery (with cause and fix), PC restarts, and PC back after a restart. An alert sent while the internet is down only arrives once it is back, so the recovery message is the reliable one." }
 $t4.Controls.AddRange(@($chkAwake, $chkUpd, $chkTray, $l4a, $ntfyBox, $ntfyTest, $l4b))
-$ni = New-Object Windows.Forms.NotifyIcon -Property @{ Icon = [Drawing.SystemIcons]::Application; Text = 'NetRefresh'; Visible = $chkTray.Checked }
+$ni = New-Object Windows.Forms.NotifyIcon -Property @{ Icon = [Drawing.SystemIcons]::Application; Text = 'NetRefresh'; Visible = $true }   # always shown, so you can see it is running
 $ni.ContextMenu = New-Object Windows.Forms.ContextMenu
 [void]$ni.ContextMenu.MenuItems.Add('Open', { $f.Show(); $f.WindowState = 'Normal'; $f.Activate() })
 [void]$ni.ContextMenu.MenuItems.Add('Exit', { $f.Close() })
@@ -386,7 +386,7 @@ $chkFull.Add_Click({ Save-Settings })
 $chkCrd.Add_Click({ $script:watchCrd = $chkCrd.Checked; Save-Settings })
 $chkTs.Add_Click({ $script:watchTs = $chkTs.Checked; Save-Settings })
 $chkAwake.Add_Click({ [Lsa]::KeepAwake($chkAwake.Checked); Save-Settings; Log "Keep-awake $(if ($chkAwake.Checked) {'on'} else {'off'})" })
-$chkTray.Add_Click({ $ni.Visible = $chkTray.Checked; Save-Settings })
+$chkTray.Add_Click({ Save-Settings })
 $chkUpd.Add_Click({
     try {
         if ($chkUpd.Checked) { New-Item $au -Force | Out-Null; New-ItemProperty $au -Name NoAutoRebootWithLoggedOnUsers -PropertyType DWord -Value 1 -Force | Out-Null; Log 'Windows Update auto-restart blocked while signed in' }
