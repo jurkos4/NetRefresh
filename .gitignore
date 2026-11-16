@@ -1,0 +1,7 @@
+# your own data and settings
+outages.csv
+netrefresh.log
+settings.json
+crash.log
+# built locally with build.bat
+NetRefresh.exe
