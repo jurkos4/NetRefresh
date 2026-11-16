@@ -15,10 +15,14 @@ if (-not (Test-Path $script:tsExe)) { $script:tsExe = $null }
 function Exec($file, $argline) {
     $psi = New-Object Diagnostics.ProcessStartInfo $file, $argline
     $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-    $p = [Diagnostics.Process]::Start($psi); $script:execOut = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd(); $p.WaitForExit(); $p.ExitCode
+    $p = [Diagnostics.Process]::Start($psi)
+    try { $script:execOut = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd(); $p.WaitForExit(); $p.ExitCode } finally { $p.Dispose() }   # release the process handle now, not whenever the GC runs
 }
 
-function Ping($h, $ms) { try { (New-Object Net.NetworkInformation.Ping).Send($h, $ms).Status -eq 'Success' } catch { $false } }
+function Ping($h, $ms) {
+    $pp = New-Object Net.NetworkInformation.Ping
+    try { $pp.Send($h, $ms).Status -eq 'Success' } catch { $false } finally { $pp.Dispose() }
+}
 
 # ok | internet | dns | tailscale  (first thing that is broken)
 function Get-Health {
@@ -31,7 +35,9 @@ function Get-Health {
     } catch { return 'dns' }
     if ($script:watchCrd) {   # Chrome Remote Desktop host service
         $svc = Get-Service chromoting -ErrorAction SilentlyContinue
-        if ($svc -and $svc.Status -ne 'Running') { return 'crd' }
+        $state = if ($svc) { $svc.Status }
+        if ($svc) { $svc.Dispose() }
+        if ($state -and $state -ne 'Running') { return 'crd' }
     }
     if ($script:watchTs -and $script:tsExe -and (Exec $script:tsExe 'status') -ne 0) {
         if ($script:execOut -match 'Logged out|NeedsLogin') { return 'tslogin' }   # only a person can sign in
@@ -123,6 +129,7 @@ function Draw-Graph($g, $w, $h, $outs) {
         $g.DrawLine($grid, [single]$x, [single]($top - 3), [single]$x, [single]($top + 7 * $rowH))
         if ($hr -lt 24) { $g.DrawString(('{0:00}' -f $hr), $font, $txt, [single]($x - 6), 2) }
     }
+    foreach ($o in $font, $track, $red, $amber, $grid) { $o.Dispose() }   # drawn on every repaint: free the GDI objects at once
 }
 
 if ($Demo) {
