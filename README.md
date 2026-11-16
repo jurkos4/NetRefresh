@@ -4,6 +4,8 @@ A small Windows tool for a PC you need to reach remotely while you are away. It 
 
 It is one window (WinForms, hosted in a tiny C# exe) and the logic is a single readable PowerShell script, `NetRefresh.ps1`.
 
+<p align="center"><img src="docs/screenshot.png" alt="NetRefresh: the Control tab and the History tab, shown with sample data" width="720"></p>
+
 ## What it does
 
 - **Daily scheduled reset** at a time you choose: flush DNS, restart the adapters, renew the lease, restart your remote-access tool. Or restart the whole PC instead.

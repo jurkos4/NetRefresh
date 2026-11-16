@@ -252,7 +252,7 @@ $t1.Controls.AddRange(@($lbl, $pick, $btn, $now, $rb, $rbCancel, $stat, $chkRb, 
 $sum = New-Object Windows.Forms.Label -Property @{ Location = '10,8'; Size = '610,20' }
 $pg = New-Object Windows.Forms.Panel -Property @{ Location = '10,32'; Size = '615,210'; BorderStyle = 'FixedSingle' }
 $pg.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'NonPublic,Instance').SetValue($pg, $true)
-$leg = New-Object Windows.Forms.Label -Property @{ Text = 'Red = internet down, amber = remote access tool (Chrome Remote Desktop / Tailscale) down. One row per day, 00:00 to 24:00.'; Location = '10,246'; Size = '610,18'; ForeColor = 'DimGray' }
+$leg = New-Object Windows.Forms.Label -Property @{ Text = 'Red = internet down, amber = remote tool down. One row per day, 00:00 to 24:00.'; Location = '10,246'; Size = '610,18'; ForeColor = 'DimGray' }
 $lv = New-Object Windows.Forms.ListView -Property @{ View = 'Details'; FullRowSelect = $true; Location = '10,270'; Size = '615,220'; Anchor = 'Top,Left,Right,Bottom' }
 [void]$lv.Columns.Add('Started', 105); [void]$lv.Columns.Add('Down', 60); [void]$lv.Columns.Add('Cause', 300); [void]$lv.Columns.Add('Fixed by', 120)
 $t2.Controls.AddRange(@($sum, $pg, $leg, $lv))
