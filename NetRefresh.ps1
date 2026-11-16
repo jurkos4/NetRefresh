@@ -215,7 +215,13 @@ $script:watchTs = [bool]($set -and $set.watchTs)
 $script:ntfy = if ($set -and $set.ntfy) { [string]$set.ntfy } else { '' }
 
 # ---------- UI ----------
-$f = New-Object Windows.Forms.Form -Property @{ Text = 'NetRefresh'; Size = '660,570'; StartPosition = 'CenterScreen'; MinimumSize = '660,570' }
+# one icon for the exe, the window and the tray: the exe's own, else src\app.ico, else the generic one
+$appIcon = try {
+    if ($ExePath) { [Drawing.Icon]::ExtractAssociatedIcon($ExePath) }
+    elseif (Test-Path (Join-Path $dir 'src\app.ico')) { New-Object Drawing.Icon (Join-Path $dir 'src\app.ico') }
+    else { [Drawing.SystemIcons]::Application }
+} catch { [Drawing.SystemIcons]::Application }
+$f = New-Object Windows.Forms.Form -Property @{ Text = 'NetRefresh'; Size = '660,570'; StartPosition = 'CenterScreen'; MinimumSize = '660,570'; Icon = $appIcon }
 $tabs = New-Object Windows.Forms.TabControl -Property @{ Dock = 'Fill' }
 $t1 = New-Object Windows.Forms.TabPage -Property @{ Text = 'Control' }
 $t2 = New-Object Windows.Forms.TabPage -Property @{ Text = 'History' }
@@ -278,7 +284,7 @@ $ntfyTest = New-Object Windows.Forms.Button -Property @{ Text = 'Send test'; Loc
 $l4b = New-Object Windows.Forms.Label -Property @{ Location = '10,142'; Size = '610,140'; ForeColor = 'DimGray'
     Text = "Install the free ntfy app on your phone and subscribe to the same topic. Use a long random topic: anyone who knows it can read the alerts. Letters, digits, - and _ only. Leave empty for no alerts.`r`n`r`nSent for: outage start, recovery (with cause and fix), PC restarts, and PC back after a restart. An alert sent while the internet is down only arrives once it is back, so the recovery message is the reliable one." }
 $t4.Controls.AddRange(@($chkAwake, $chkUpd, $chkTray, $l4a, $ntfyBox, $ntfyTest, $l4b))
-$ni = New-Object Windows.Forms.NotifyIcon -Property @{ Icon = [Drawing.SystemIcons]::Application; Text = 'NetRefresh'; Visible = $true }   # always shown, so you can see it is running
+$ni = New-Object Windows.Forms.NotifyIcon -Property @{ Icon = $appIcon; Text = 'NetRefresh'; Visible = $true }   # always shown, so you can see it is running
 $ni.ContextMenu = New-Object Windows.Forms.ContextMenu
 [void]$ni.ContextMenu.MenuItems.Add('Open', { $f.Show(); $f.WindowState = 'Normal'; $f.Activate() })
 [void]$ni.ContextMenu.MenuItems.Add('Exit', { $f.Close() })
@@ -496,4 +502,4 @@ Log 'Watching the connection every 10 s. Leave this window open.'
 Refresh-History
 Update-Login; Log $lblLogin.Text
 if ($set -and $set.armed) { Arm }
-[void]$f.ShowDialog()
+[Windows.Forms.Application]::Run($f)   # not ShowDialog: hiding a modal dialog ends it, which quit the app when it went to the tray
