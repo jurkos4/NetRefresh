@@ -3,5 +3,6 @@ outages.csv
 netrefresh.log
 settings.json
 crash.log
+__pycache__/
 # built locally with build.bat
 NetRefresh.exe

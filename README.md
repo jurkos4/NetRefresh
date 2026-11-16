@@ -44,6 +44,10 @@ The **Auto-login** tab makes Windows sign in by itself after a restart, so the P
 - The phone-alert topic is the only secret in ntfy.sh: use a long random one.
 - If a remote tool is logged out (for example Tailscale), only a person can sign it in again; NetRefresh reports it but does not restart in a loop.
 
+## Linux servers
+
+The [`linux/`](linux) folder holds a separate, headless version for Linux servers (Python and systemd, no window). It does not depend on anything above: **delete the `linux/` folder if you don't need it.**
+
 ## License
 
 MIT, see `LICENSE`.

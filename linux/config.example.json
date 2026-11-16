@@ -1,0 +1,11 @@
+{
+  "daily_time": "06:15",
+  "daily_action": "reset",
+  "check_interval": 10,
+  "ping_hosts": ["1.1.1.1", "8.8.8.8"],
+  "dns_name": "example.com",
+  "watch_services": [],
+  "reboot_last_resort": true,
+  "ntfy_topic": "",
+  "data_dir": "/var/lib/netrefresh"
+}

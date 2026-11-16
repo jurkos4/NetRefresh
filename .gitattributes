@@ -1,0 +1,2 @@
+# scripts for Linux must keep LF line endings even when committed from Windows
+linux/* text eol=lf
