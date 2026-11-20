@@ -4,5 +4,6 @@ netrefresh.log
 settings.json
 crash.log
 __pycache__/
+preview-data/
 # built locally with build.bat
 NetRefresh*.exe

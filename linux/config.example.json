@@ -7,5 +7,7 @@
   "watch_services": [],
   "reboot_last_resort": true,
   "ntfy_topic": "",
+  "heartbeat_url": "",
+  "router_plug": {"type": "", "host": ""},
   "data_dir": "/var/lib/netrefresh"
 }

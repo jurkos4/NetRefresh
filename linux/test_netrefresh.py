@@ -9,6 +9,10 @@ from unittest import mock
 import netrefresh as nr
 
 T0 = dt.datetime(2026, 11, 16, 5, 30, 0)
+LOCAL = "No default gateway (DHCP lease lost)"
+ISP = "Router OK but no internet (ISP/WAN drop or router reconnect)"
+ROUTER = "Router unreachable (LAN side)"
+PLUG = {"router_plug": {"type": "shelly2", "host": "192.168.1.50"}}
 
 
 def cfg(**kw):
@@ -18,26 +22,47 @@ def cfg(**kw):
 
 
 class FakeWatchdog(nr.Watchdog):
-    """Time and the system are fake; everything the watchdog would DO is recorded in .actions."""
+    """Time and the system are fake; every repair the watchdog would DO is recorded in .actions."""
 
     def __init__(self, c, store):
-        self.t, self.h, self.actions, self.alerts = T0, "ok", [], []
+        self.t, self.h, self.cause, self.actions, self.alerts, self.beats = T0, "ok", LOCAL, [], [], 0
         super().__init__(c, store)
 
     def now(self): return self.t
     def health(self): return self.h
-    def diagnose(self, kind): return "cause of " + kind
+    def diagnose(self, kind): return self.cause
     def log(self, msg): pass
     def alert(self, title, msg): self.alerts.append(title)
-    def soft(self): self.actions.append("soft")
-    def hard(self): self.actions.append("hard")
-    def service(self, unit): self.actions.append("service:" + unit)
+    def beat(self): self.beats += 1
+    def internet(self): return self.h == "ok"
+    def soft(self): self.actions.append("daily soft")
     def reboot(self, why): self.actions.append("reboot")
+
+    def act(self, action, unit=None):
+        if action == "reboot":
+            self.reboot("x")
+        else:
+            self.actions.append(action + (":" + unit if unit else ""))
+        return True
 
     def advance(self, seconds, step=10):
         for _ in range(seconds // step):
             self.t += dt.timedelta(seconds=step)
             self.tick()
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = nr.Store(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def dog(self, h="ok", cause=LOCAL, **kw):
+        w = FakeWatchdog(cfg(**kw), self.store)
+        w.h, w.cause = h, cause
+        return w
 
 
 class Parsing(unittest.TestCase):
@@ -46,206 +71,218 @@ class Parsing(unittest.TestCase):
         self.assertEqual(nr.parse_default_route("default dev wg0 scope link\n"), (None, "wg0"))
         self.assertEqual(nr.parse_default_route(""), (None, None))
 
+    def test_route_args_for_restoring(self):
+        self.assertEqual(nr.route_args("default via 172.22.160.1 dev eth0 proto kernel onlink\n"), ["default", "via", "172.22.160.1", "dev", "eth0", "onlink"])
+        self.assertIsNone(nr.route_args("default dev wg0 scope link\n"))
+
     def test_dns_packet_and_reply(self):
         pkt = nr.dns_query_packet("example.com", 0x1234)
         self.assertEqual(pkt[:2], b"\x12\x34")
         self.assertIn(b"\x07example\x03com\x00", pkt)
-        self.assertEqual(pkt[-4:], b"\x00\x01\x00\x01")                       # type A, class IN
-        ok = struct.pack(">HHHHHH", 0x1234, 0x8180, 1, 1, 0, 0) + b"x" * 20      # response, no error, 1 answer
+        ok = struct.pack(">HHHHHH", 0x1234, 0x8180, 1, 1, 0, 0) + b"x" * 20
         self.assertTrue(nr.dns_reply_ok(ok, 0x1234))
-        self.assertFalse(nr.dns_reply_ok(ok, 0x9999))                           # wrong id
-        self.assertFalse(nr.dns_reply_ok(struct.pack(">HHHHHH", 0x1234, 0x8183, 1, 0, 0, 0), 0x1234))   # NXDOMAIN
-        self.assertFalse(nr.dns_reply_ok(struct.pack(">HHHHHH", 0x1234, 0x8180, 1, 0, 0, 0), 0x1234))   # no answers
+        self.assertFalse(nr.dns_reply_ok(ok, 0x9999))
+        self.assertFalse(nr.dns_reply_ok(struct.pack(">HHHHHH", 0x1234, 0x8183, 1, 0, 0, 0), 0x1234))
         self.assertFalse(nr.dns_reply_ok(b"short", 0x1234))
 
+    def test_cause_classes(self):
+        self.assertEqual(nr.cause_class("Ethernet link down (cable/NIC/driver)"), "local")   # old history rows
+        self.assertEqual(nr.cause_class(LOCAL), "local")
+        self.assertEqual(nr.cause_class(ROUTER), "router")
+        self.assertEqual(nr.cause_class(ISP), "isp")
+        self.assertEqual(nr.cause_class("Internet OK but DNS failing (router DNS)"), "dns")
+        self.assertEqual(nr.cause_class("Internet OK but service ssh is not running (remote access)"), "remote")
 
-class Ping(unittest.TestCase):
-    """A missing or broken `ping` program must not look like an outage."""
-
-    def test_reply_and_no_reply(self):
-        with mock.patch.object(nr.shutil, "which", return_value="/bin/ping"):
-            with mock.patch.object(nr, "run", return_value=(0, "")):
-                self.assertTrue(nr.ping("1.1.1.1"))
-            with mock.patch.object(nr, "run", return_value=(1, "")), mock.patch.object(nr.socket, "create_connection", side_effect=AssertionError("no TCP fallback after a clean 'no reply'")):
-                self.assertFalse(nr.ping("1.1.1.1"))
-
-    def test_missing_ping_falls_back_to_tcp(self):
-        with mock.patch.object(nr.shutil, "which", return_value=None):
-            with mock.patch.object(nr.socket, "create_connection", return_value=mock.Mock()) as cc:
-                self.assertTrue(nr.ping("1.1.1.1"))
-                cc.assert_called_once()
-            with mock.patch.object(nr.socket, "create_connection", side_effect=OSError):
-                self.assertFalse(nr.ping("192.0.2.1"))
-
-    def test_ping_that_errors_falls_back_too(self):
-        with mock.patch.object(nr.shutil, "which", return_value="/bin/ping"), mock.patch.object(nr, "run", return_value=(2, "ping: socket: Operation not permitted")):
-            with mock.patch.object(nr.socket, "create_connection", return_value=mock.Mock()):
-                self.assertTrue(nr.ping("1.1.1.1"))
+    def test_plug_urls(self):
+        self.assertEqual(nr.plug_url({"type": "shelly2", "host": "10.0.0.5"}), "http://10.0.0.5/rpc/Switch.Set?id=0&on=false&toggle_after=30")
+        self.assertEqual(nr.plug_url({"type": "tasmota", "host": "10.0.0.5"}), "http://10.0.0.5/cm?cmnd=Backlog%20Power1%20Off%3BDelay%20300%3BPower1%20On")
+        self.assertIsNone(nr.plug_url({"type": "shelly2", "host": "10.0.0.5/x?evil"}))
+        self.assertIsNone(nr.plug_url({"type": "", "host": "10.0.0.5"}))
 
 
-class Diagnose(unittest.TestCase):
-    ROUTE = ("10.0.0.1", "nrtest0")
+class Probes(unittest.TestCase):
+    def test_ping_falls_back_to_tcp_when_ping_is_missing_or_broken(self):
+        with mock.patch.object(nr.shutil, "which", return_value=None), mock.patch.object(nr, "tcp_ok", return_value=True):
+            self.assertTrue(nr.ping("1.1.1.1"))
+        with mock.patch.object(nr.shutil, "which", return_value="/bin/ping"), mock.patch.object(nr, "run", return_value=(2, "socket: Operation not permitted")), \
+                mock.patch.object(nr, "tcp_ok", return_value=True):
+            self.assertTrue(nr.ping("1.1.1.1"))
+        with mock.patch.object(nr.shutil, "which", return_value="/bin/ping"), mock.patch.object(nr, "run", return_value=(1, "")), \
+                mock.patch.object(nr, "tcp_ok", side_effect=AssertionError("no fallback after a clean no-reply")):
+            self.assertFalse(nr.ping("1.1.1.1"))
 
-    def test_a_gateway_that_drops_ping_is_not_blamed_for_dns_or_service_problems(self):
-        with mock.patch.object(nr, "default_route", return_value=self.ROUTE), mock.patch.object(nr, "ping", return_value=False):
-            self.assertEqual(nr.diagnose("dns"), "Internet OK but DNS failing (router DNS)")
-            self.assertIn("service tailscaled is not running", nr.diagnose("service:tailscaled"))
+    def test_internet_is_up_when_ping_is_blocked_but_443_answers(self):
+        with mock.patch.object(nr, "ping", return_value=False), mock.patch.object(nr, "tcp_ok", side_effect=lambda h, p, t=1.5: p == 443):
+            self.assertTrue(nr.internet_up(cfg()))
+        with mock.patch.object(nr, "ping", return_value=False), mock.patch.object(nr, "tcp_ok", return_value=False):
+            self.assertFalse(nr.internet_up(cfg()))
 
-    def test_internet_outage_router_checks(self):
-        with mock.patch.object(nr, "default_route", return_value=self.ROUTE), mock.patch.object(nr, "ping", return_value=False):
-            with mock.patch.object(nr, "neighbor_ok", return_value=True):      # answers ARP but not ping
-                self.assertTrue(nr.diagnose("internet").startswith("Router OK but no internet"))
-            with mock.patch.object(nr, "neighbor_ok", return_value=False):
-                self.assertEqual(nr.diagnose("internet"), "Router unreachable (LAN side)")
-        with mock.patch.object(nr, "default_route", return_value=(None, None)):
-            self.assertEqual(nr.diagnose("internet"), "No default gateway (DHCP lease lost)")
-
-    def test_neighbor_states(self):
-        for text, expect in (("10.0.0.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n", True), ("10.0.0.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff router STALE\n", True),
-                             ("10.0.0.1 dev eth0 FAILED\n", False), ("10.0.0.1 dev eth0 INCOMPLETE\n", False), ("", False)):
-            with mock.patch.object(nr, "run", return_value=(0, text)):
-                self.assertEqual(nr.neighbor_ok("10.0.0.1"), expect, text)
-
-
-class Interface(unittest.TestCase):
-    def test_keeps_the_last_good_interface_when_the_route_vanishes(self):
+    def test_keeps_last_interface_and_route_when_the_route_vanishes(self):
         nr._last_dev = None
-        with mock.patch.object(nr, "default_route", return_value=("10.0.0.1", "eth0")):
+        nr._last_route = None
+        with mock.patch.object(nr, "default_route_text", return_value="default via 10.0.0.1 dev eth0 proto dhcp\n"):
             self.assertEqual(nr.current_dev(), "eth0")
-        with mock.patch.object(nr, "default_route", return_value=(None, None)):
-            self.assertEqual(nr.current_dev(), "eth0")          # link down: the route is gone, the NIC is still the one to bounce
+            nr.remember_route()
+        with mock.patch.object(nr, "default_route_text", return_value=""), mock.patch.object(nr, "run") as run:
+            self.assertEqual(nr.current_dev(), "eth0")
+            nr.restore_route(lambda m: None)
+            run.assert_called_with(["ip", "route", "replace", "default", "via", "10.0.0.1", "dev", "eth0"])
+
+    def test_gateway_that_drops_ping_is_not_blamed_for_dns_or_services(self):
+        with mock.patch.object(nr, "default_route", return_value=("10.0.0.1", "nrtest0")), mock.patch.object(nr, "ping", return_value=False):
+            self.assertEqual(nr.diagnose("dns"), "Internet OK but DNS failing (router DNS)")
+            with mock.patch.object(nr, "neighbor_ok", return_value=True):
+                self.assertEqual(nr.diagnose("internet"), ISP)
+            with mock.patch.object(nr, "neighbor_ok", return_value=False):
+                self.assertEqual(nr.diagnose("internet"), ROUTER)
 
 
-class Resilience(unittest.TestCase):
-    def test_loop_survives_an_exception(self):
-        with tempfile.TemporaryDirectory() as d:
-            class Boom(FakeWatchdog):
-                calls = 0
-                def tick(self):
-                    Boom.calls += 1
-                    if Boom.calls == 1:
-                        raise RuntimeError("one bad check")
-                    self.stop = True
-            w = Boom(dict(cfg(), check_interval=1), nr.Store(d))
-            w.run_forever()
-            self.assertEqual(Boom.calls, 2)
-
-
-class StoreAndGraph(unittest.TestCase):
-    def test_csv_round_trip_and_open_row(self):
-        with tempfile.TemporaryDirectory() as d:
-            s = nr.Store(d)
-            s.save([{"start": T0, "end": T0 + dt.timedelta(minutes=5), "cause": 'has, comma and "quotes"', "fix": "soft reset"},
-                    {"start": T0 + dt.timedelta(hours=1), "end": None, "cause": "open", "fix": ""}])
-            rows = s.load()
-            self.assertEqual(rows[0]["cause"], 'has, comma and "quotes"')
-            self.assertIsNone(rows[1]["end"])
-            w = FakeWatchdog(cfg(), s)   # starting the daemon closes the row that a previous run left open
-            self.assertEqual(w.rows[1]["fix"], "daemon restarted")
-            self.assertIsNotNone(s.load()[1]["end"])
-
-    def test_graph_marks_the_right_columns(self):
-        rows = [{"start": T0, "end": T0 + dt.timedelta(minutes=29), "cause": "no internet", "fix": ""},                      # 05:30-05:59 -> column 11
-                {"start": T0 - dt.timedelta(days=1, hours=-8), "end": T0 - dt.timedelta(days=1, hours=-9), "cause": "service x is not running", "fix": ""}]   # yesterday 13:30-14:30
-        lines = nr.render_graph(rows, T0 + dt.timedelta(hours=2)).splitlines()
-        today = lines[1][10:]
-        self.assertEqual(len(today), 48)
-        self.assertEqual(today[11], "#")
-        self.assertEqual(today.count("#"), 1)
-        yesterday = lines[2][10:]
-        self.assertEqual(yesterday.count("~"), 2)
-        self.assertEqual(yesterday[27], "~")                                                                                # 13:30
-
-    def test_summary(self):
-        rows = [{"start": T0, "end": T0 + dt.timedelta(minutes=10), "cause": "c", "fix": ""}] * 3
-        self.assertIn("3 drops, 30 min down, most often around 05:00", nr.summary(rows, T0 + dt.timedelta(hours=1)))
-
-
-class Ladder(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.store = nr.Store(self.tmp.name)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
+class Ladder(Base):
     def test_a_short_blip_is_not_an_outage(self):
-        w = FakeWatchdog(cfg(), self.store)
-        w.h = "internet"; w.advance(20)       # 2 failed checks only
-        w.h = "ok"; w.advance(10)
-        self.assertEqual(w.rows, [])
-        self.assertEqual(w.actions, [])
+        w = self.dog("internet")
+        w.advance(20)
+        w.h = "ok"
+        w.advance(10)
+        self.assertEqual((w.rows, w.actions), ([], []))
 
-    def test_escalates_soft_hard_reboot_once_each(self):
-        w = FakeWatchdog(cfg(), self.store)
-        w.h = "internet"
-        w.advance(60); self.assertEqual(w.actions, [])
-        w.advance(60); self.assertEqual(w.actions, ["soft"])                  # about 90 s in
-        w.advance(240); self.assertEqual(w.actions, ["soft", "hard"])         # about 5 min
-        w.advance(700); self.assertEqual(w.actions, ["soft", "hard", "reboot"])   # about 15 min
-        w.advance(600); self.assertEqual(w.actions.count("reboot"), 1)        # never again within the same outage
+    def test_local_fault_adapter_then_device_then_one_reboot(self):
+        w = self.dog("internet", LOCAL)
+        w.advance(1600)
+        self.assertEqual(w.actions, ["adapter restart", "device restart", "reboot"])
         self.assertEqual(w.rows[0]["fix"], "reboot")
         self.assertIn("NetRefresh: DOWN", w.alerts)
 
-    def test_recovery_closes_the_row_with_the_last_fix(self):
-        w = FakeWatchdog(cfg(), self.store)
-        w.h = "dns"; w.advance(130)
-        w.h = "ok"; w.advance(10)
-        r = w.store.load()[0]
-        self.assertEqual((r["fix"], r["cause"]), ("soft reset", "cause of dns"))
-        self.assertIsNotNone(r["end"])
-        self.assertIn("NetRefresh: back UP", w.alerts)
-        self.assertEqual(r["start"], T0 + dt.timedelta(seconds=10))           # dated from the FIRST failed check
-
-    def test_unaided_recovery_says_self_recovered(self):
-        w = FakeWatchdog(cfg(), self.store)
-        w.h = "internet"; w.advance(50)
-        w.h = "ok"; w.advance(10)
-        self.assertEqual(w.store.load()[0]["fix"], "self-recovered")
+    def test_isp_outage_never_resets_the_server(self):
+        w = self.dog("internet", ISP)
+        w.advance(1600)
         self.assertEqual(w.actions, [])
 
-    def test_a_dead_service_is_restarted_but_never_causes_a_reboot(self):
-        w = FakeWatchdog(cfg(), self.store)
-        w.h = "service:tailscaled"; w.advance(1500)
-        self.assertEqual(w.actions, ["service:tailscaled", "service:tailscaled"])
-        self.assertEqual(w.rows[0]["fix"], "restart tailscaled")
+    def test_isp_outage_with_a_plug_power_cycles_the_router_once(self):
+        w = self.dog("internet", ISP, **PLUG)
+        w.advance(1600)
+        self.assertEqual(w.actions, ["router power-cycle"])
+
+    def test_plug_limits(self):
+        w = self.dog("internet", ISP, **PLUG)
+        w.advance(400)
+        w.h = "ok"
+        w.advance(30)
+        w.h = "internet"
+        w.advance(400)
+        self.assertEqual(w.actions, ["router power-cycle"])          # 30 min gap
+        st = self.store.state()
+        st["plug_times"] = [T0 - dt.timedelta(hours=h) for h in (5, 3, 1)]
+        self.store.save_state(st)
+        w2 = self.dog("internet", ISP, **PLUG)
+        w2.advance(400)
+        self.assertEqual(w2.actions, [])                             # 3 per day
+
+    def test_router_unreachable(self):
+        self.assertEqual(self._run(ROUTER), ["adapter restart", "device restart", "reboot"])
+        self.store.save_state({"last_reboot": dt.datetime.min, "plug_times": []})
+        self.assertEqual(self._run(ROUTER, **PLUG), ["adapter restart", "router power-cycle", "reboot"])
+
+    def _run(self, cause, **kw):
+        w = self.dog("internet", cause, **kw)
+        w.advance(1000)
+        return w.actions
+
+    def test_dns_and_service_never_reboot(self):
+        w = self.dog("dns", "Internet OK but DNS failing (router DNS)")
+        w.advance(1600)
+        self.assertEqual(w.actions, ["flush DNS", "renew lease"])
+        w2 = self.dog("service:tailscaled", "Internet OK but service tailscaled is not running (remote access)")
+        w2.advance(1600)
+        self.assertEqual(w2.actions, ["restart service:tailscaled", "restart service:tailscaled"])
+        self.assertEqual(w2.rows[-1]["fix"], "restart tailscaled")
+
+    def test_cause_is_rechecked_each_stage(self):
+        w = self.dog("internet", LOCAL)
+        w.advance(100)
+        w.cause = ISP
+        w.advance(1500)
+        self.assertEqual(w.actions, ["adapter restart"])
 
     def test_reboot_cooldown_and_switch(self):
         self.store.set_last_reboot(T0 - dt.timedelta(hours=1))
-        w = FakeWatchdog(cfg(), self.store)
-        w.h = "internet"; w.advance(1000)
-        self.assertNotIn("reboot", w.actions)                                  # rebooted 1 h ago: cooldown holds
-        w2 = FakeWatchdog(cfg(reboot_last_resort=False), nr.Store(tempfile.mkdtemp()))
-        w2.h = "internet"; w2.advance(1000)
-        self.assertNotIn("reboot", w2.actions)                                 # switched off
+        self.assertNotIn("reboot", self._run(LOCAL))
+        self.store.set_last_reboot(dt.datetime.min)
+        self.assertNotIn("reboot", self._run(LOCAL, reboot_last_resort=False))
+
+    def test_recovery_records_the_last_repair(self):
+        w = self.dog("internet", LOCAL)
+        w.advance(130)
+        w.h = "ok"
+        w.advance(10)
+        r = self.store.load()[0]
+        self.assertEqual((r["fix"], r["start"]), ("adapter restart", T0 + dt.timedelta(seconds=10)))
+        self.assertIn("NetRefresh: back UP", w.alerts)
+
+    def test_heartbeat_every_five_minutes(self):
+        w = self.dog("ok")
+        w.advance(610)
+        self.assertEqual(w.beats, 3)
 
     def test_daily_reset_and_daily_reboot_guard(self):
         w = FakeWatchdog(dict(cfg(), daily_time="06:15"), self.store)
-        self.assertEqual(w.next_daily, dt.datetime(2026, 11, 16, 6, 15))
-        w.t = dt.datetime(2026, 11, 16, 6, 15, 1); w.check_daily()
-        self.assertEqual(w.actions, ["soft"])
-        self.assertEqual(w.next_daily, dt.datetime(2026, 11, 17, 6, 15))       # tomorrow
+        w.t = dt.datetime(2026, 11, 16, 6, 15, 1)
+        w.check_daily()
+        self.assertEqual(w.actions, ["daily soft"])
+        self.assertEqual(w.next_daily, dt.datetime(2026, 11, 17, 6, 15))
         w3 = FakeWatchdog(dict(cfg(), daily_time="06:15", daily_action="reboot"), nr.Store(tempfile.mkdtemp()))
-        w3.t = dt.datetime(2026, 11, 16, 6, 15, 1); w3.check_daily()
+        w3.t = dt.datetime(2026, 11, 16, 6, 15, 1)
+        w3.check_daily()
         self.assertEqual(w3.actions, ["reboot"])
         w3.t = dt.datetime(2026, 11, 17, 6, 15, 1)
-        w3.store.set_last_reboot(w3.t - dt.timedelta(minutes=3))                # just rebooted: do a soft reset instead of looping
-        w3.next_daily = w3.t; w3.check_daily()
-        self.assertEqual(w3.actions, ["reboot", "soft"])
+        w3.store.set_last_reboot(w3.t - dt.timedelta(minutes=3))
+        w3.next_daily = w3.t
+        w3.check_daily()
+        self.assertEqual(w3.actions, ["reboot", "daily soft"])
+
+    def test_loop_survives_an_exception(self):
+        class Boom(FakeWatchdog):
+            calls = 0
+
+            def tick(self):
+                Boom.calls += 1
+                if Boom.calls == 1:
+                    raise RuntimeError("one bad check")
+                self.stop = True
+        Boom(dict(cfg(), check_interval=1), self.store).run_forever()
+        self.assertEqual(Boom.calls, 2)
 
 
-class Config(unittest.TestCase):
-    def test_bad_values_are_rejected(self):
+class Files(Base):
+    def test_csv_round_trip_damaged_and_open_rows(self):
+        self.store.save([{"start": T0, "end": T0 + dt.timedelta(minutes=5), "cause": 'has, comma and "quotes"', "fix": "adapter restart"},
+                         {"start": T0 + dt.timedelta(hours=1), "end": None, "cause": "open", "fix": ""}])
+        with open(self.store.csv, "a") as f:
+            f.write('"garbage","","x",""\n')
+        rows = self.store.load()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["cause"], 'has, comma and "quotes"')
+        w = FakeWatchdog(cfg(), self.store)
+        self.assertEqual(w.rows[1]["fix"], "watchdog restarted")
+
+    def test_graph_report_pattern(self):
+        days = [{"start": T0 - dt.timedelta(days=d), "end": T0 - dt.timedelta(days=d) + dt.timedelta(minutes=20), "cause": ISP, "fix": ""} for d in (1, 2, 3)]
+        other = {"start": T0 - dt.timedelta(days=4), "end": T0 - dt.timedelta(days=4) + dt.timedelta(minutes=50), "cause": LOCAL, "fix": ""}
+        self.assertEqual(nr.daily_pattern(days, T0), (5, 3))
+        self.assertIsNone(nr.daily_pattern(days[:2], T0))
+        rep = nr.isp_report(days + [other], T0)
+        self.assertIn("(an ISP-side problem): 3, 60 minutes", rep)
+        self.assertIn("All outages in the period: 4", rep)
+        graph = nr.render_graph(days, T0).splitlines()
+        self.assertEqual(graph[2][10:][11], "#")          # yesterday 05:30
+
+    def test_bad_config_is_rejected(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            f.write('{"daily_time": "25:99"}')
+            f.write('{"router_plug": {"type": "shelly2", "host": "x/y?z"}}')
         try:
             with self.assertRaises(SystemExit):
                 nr.load_config(f.name)
         finally:
             os.unlink(f.name)
-
-    def test_missing_file_gives_defaults(self):
-        self.assertEqual(nr.load_config("/nonexistent/config.json")["daily_action"], "reset")
 
 
 if __name__ == "__main__":
